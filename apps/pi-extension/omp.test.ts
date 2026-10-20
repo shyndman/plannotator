@@ -55,7 +55,7 @@ async function waitFor<T>(what: string, check: () => T | undefined | null | fals
 }
 
 describe.skipIf(!ompBin || process.platform === "win32")("Oh My Pi: Ask this session (the real omp in RPC mode)", () => {
-	test("/plannotator-annotate in OMP offers Ask this session, and a question is answered by the OMP session", async () => {
+	test("OMP answers Ask this session and receives annotate and review feedback while idle", async () => {
 		stubHtml();
 		const root = realpathSync(mkdtempSync(join(tmpdir(), "plannotator-omp-")));
 		const home = join(root, "home");
@@ -64,10 +64,25 @@ describe.skipIf(!ompBin || process.platform === "win32")("Oh My Pi: Ask this ses
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(project, { recursive: true });
 		writeFileSync(join(project, "notes.md"), "# Notes\n\nThe secret number is 42.\n");
+		writeFileSync(join(project, "review.patch"), [
+			"diff --git a/notes.md b/notes.md",
+			"--- a/notes.md",
+			"+++ b/notes.md",
+			"@@ -1 +1 @@",
+			"-# Old notes",
+			"+# Notes",
+			"",
+		].join("\n"));
 
-		const model = startScriptedModel((request) =>
-			lastMessage(request).text.includes(ASK_HEADER) ? { text: ANSWER } : { text: "OK." },
-		);
+		const busyTurn = Promise.withResolvers<void>();
+		const model = startScriptedModel((request) => {
+			const prompt = lastMessage(request).text;
+			if (prompt.includes(ASK_HEADER)) return { text: ANSWER };
+			if (prompt === "Hold this turn for the feedback check.") {
+				return { text: "Finished the original work.", hold: busyTurn.promise };
+			}
+			return { text: "OK." };
+		});
 		writeFileSync(
 			join(agentDir, "models.yml"),
 			[
@@ -174,7 +189,71 @@ describe.skipIf(!ompBin || process.platform === "win32")("Oh My Pi: Ask this ses
 			}
 			const plan = (await (await fetch(`${url}/api/plan`)).json()) as { serverConfig: Record<string, unknown> };
 			expect(plan.serverConfig).toMatchObject({ agentToolHost: "oh-my-pi", agentToolEnabled: true, agentToolConfigured: false });
+
+			// A successful HTTP response is not delivery: each submission must
+			// reach a new model request without another person prompt.
+			const submitFeedback = async (reviewUrl: string, feedback: string) => {
+				const response = await fetch(`${reviewUrl}/api/feedback`, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ feedback, annotations: [] }),
+				});
+				expect(response.status).toBe(200);
+				await waitFor("feedback to reach the OMP model", () =>
+					model.requests.some((request) => lastMessage(request).text.includes(feedback)),
+				);
+			};
+			await submitFeedback(url, "Keep the number 42 in the notes.");
+			await waitFor("the feedback turn to finish", () =>
+				events.filter((event) => event.type === "agent_end").length >= 2,
+			);
+
+			const reviewEventStart = events.length;
+			send({ id: "review", type: "prompt", message: "/plannotator-review --patch-file review.patch" });
+			const reviewUrl = await waitFor("the code review URL", () => {
+				for (const event of events.slice(reviewEventStart)) {
+					if (event.type !== "extension_ui_request") continue;
+					const match = /http:\/\/(?:localhost|127\.0\.0\.1):\d+/.exec(JSON.stringify(event));
+					if (match) return match[0];
+				}
+				return null;
+			});
+			await submitFeedback(reviewUrl, "Preserve the existing notes heading.");
+			await waitFor("the review feedback turn to finish", () =>
+				events.filter((event) => event.type === "agent_end").length >= 3,
+			);
+
+			const busyReviewStart = events.length;
+			send({ id: "busy-review", type: "prompt", message: "/plannotator-review --patch-file review.patch" });
+			const busyReviewUrl = await waitFor("the next code review URL", () => {
+				for (const event of events.slice(busyReviewStart)) {
+					if (event.type !== "extension_ui_request") continue;
+					const match = /http:\/\/(?:localhost|127\.0\.0\.1):\d+/.exec(JSON.stringify(event));
+					if (match) return match[0];
+				}
+				return null;
+			});
+			send({ id: "work", type: "prompt", message: "Hold this turn for the feedback check." });
+			await waitFor("OMP to be working", () =>
+				model.requests.some((request) => lastMessage(request).text === "Hold this turn for the feedback check."),
+			);
+			const busyFeedback = "Keep this feedback after the original work.";
+			const submitted = await fetch(`${busyReviewUrl}/api/feedback`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ feedback: busyFeedback, annotations: [] }),
+			});
+			expect(submitted.status).toBe(200);
+			expect(model.requests.some((request) => lastMessage(request).text.includes(busyFeedback))).toBe(false);
+			busyTurn.resolve();
+			await waitFor("busy feedback to reach the model after the original work", () =>
+				model.requests.some((request) =>
+					lastMessage(request).text.includes(busyFeedback) &&
+					request.messages.some((message) => message.role === "assistant" && messageText(message.content).includes("Finished the original work.")),
+				),
+			);
 		} finally {
+			busyTurn.resolve();
 			omp.stdin.end();
 			await Promise.race([omp.exited, Bun.sleep(5_000)]);
 			omp.kill(9);
