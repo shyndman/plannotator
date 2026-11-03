@@ -55,6 +55,7 @@ function createHarness(cwd: string) {
 	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
 	const notifications: string[] = [];
 	const widgets: Array<string[] | undefined> = [];
+	const statuses: Array<string | undefined> = [];
 	const state = { activeTools: ["read", "bash", "edit", "write"], thinkingLevel: "medium" };
 
 	const pi = {
@@ -103,7 +104,7 @@ function createHarness(cwd: string) {
 		},
 		ui: {
 			notify: (message: string) => notifications.push(message),
-			setStatus: () => undefined,
+			setStatus: (_key: string, text: string | undefined) => statuses.push(text),
 			setWidget: (_key: string, content: string[] | undefined) => widgets.push(content),
 			theme: {
 				fg: (_color: string, text: string) => text,
@@ -117,6 +118,7 @@ function createHarness(cwd: string) {
 		commands,
 		notifications,
 		widgets,
+		statuses,
 		async startSession(): Promise<void> {
 			plannotator(pi as never);
 			for (const handler of handlers.get("session_start") ?? []) {
@@ -226,28 +228,7 @@ describe("plan execution mirrors into a detected todo provider", () => {
 		expect(readFileSync(planPath, "utf8")).toBe("# Plan\n\n- [x] First step\n- [ ] Second step\n");
 	});
 
-	test("keeps the progress widget even while mirroring", async () => {
-		const cwd = makeTempDir("plannotator-todo-sync-");
-		const todosDir = join(cwd, ".pi", "todos");
-		mkdirSync(todosDir, { recursive: true });
-		writeFileSync(join(cwd, "PLAN.md"), PLAN_CONTENT);
-
-		const harness = createHarness(cwd);
-		await harness.startSession();
-		await harness.submitPlan("PLAN.md");
-
-		// The mirror is additive: the tracker still renders both steps...
-		const rendered = harness.widgets.filter((content): content is string[] => Array.isArray(content));
-		expect(rendered.at(-1)).toHaveLength(2);
-
-		// ...and the provider actually received the same two steps, not just
-		// an empty or partial mirror running alongside an unaffected widget.
-		const todos = readTodos(todosDir);
-		expect(todos.map((todo) => todo.title).sort()).toEqual(["1. First step", "2. Second step"]);
-		for (const todo of todos) expect(todo.status).toBe("open");
-	});
-
-	test("stays widget-only when no provider is present", async () => {
+	test("shows status-line progress when no provider is present", async () => {
 		const cwd = makeTempDir("plannotator-todo-sync-");
 		writeFileSync(join(cwd, "PLAN.md"), PLAN_CONTENT);
 
@@ -259,8 +240,8 @@ describe("plan execution mirrors into a detected todo provider", () => {
 		// No .pi/todos to detect, so nothing is created and nothing warns.
 		expect(existsSync(join(cwd, ".pi", "todos"))).toBe(false);
 		expect(harness.notifications.filter((note) => note.includes("sync failed"))).toEqual([]);
-		const rendered = harness.widgets.filter((content): content is string[] => Array.isArray(content));
-		expect(rendered.at(-1)).toHaveLength(2);
+		expect(harness.statuses.at(-1)).toBe("📋 1/2");
+		expect(harness.widgets).toEqual([]);
 	});
 
 	test("re-detects a provider that appears after the first plan", async () => {
@@ -284,7 +265,7 @@ describe("plan execution mirrors into a detected todo provider", () => {
 		expect(readTodos(todosDir).map((todo) => todo.title)).toEqual(["1. Later step"]);
 	});
 
-	test("a sync failure notifies once and latches while the widget keeps updating", async () => {
+	test("a sync failure notifies once while status progress keeps updating", async () => {
 		const cwd = makeTempDir("plannotator-todo-sync-");
 		const todosDir = join(cwd, ".pi", "todos");
 		mkdirSync(todosDir, { recursive: true });
@@ -309,9 +290,7 @@ describe("plan execution mirrors into a detected todo provider", () => {
 		const failureNotices = harness.notifications.filter((note) => note.includes("sync failed"));
 		expect(failureNotices).toHaveLength(1);
 
-		// The widget is wired independently of provider health: execution
-		// keeps rendering progress after the provider latches disabled.
-		const rendered = harness.widgets.filter((content): content is string[] => Array.isArray(content));
-		expect(rendered.at(-1)).toHaveLength(2);
+		expect(harness.statuses.at(-1)).toBe("📋 2/2");
+		expect(harness.widgets).toEqual([]);
 	});
 });

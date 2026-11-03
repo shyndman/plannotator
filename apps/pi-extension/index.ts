@@ -92,7 +92,6 @@ import {
 	type PlannotatorSessionAction,
 	type SessionEventHandle,
 } from "./session-events.ts";
-import { checklistWindow } from "./checklist-window.ts";
 import { isBrowserSessionStoppedError } from "./browser-session-error.ts";
 import { classifyAnnotateOutcome } from "./annotate-outcome.ts";
 import { classifyReviewOutcome } from "./review-outcome.ts";
@@ -592,34 +591,12 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		}
 	}
 
-	function updateWidget(ctx: ExtensionContext): void {
-		if (phase === "executing" && checklistItems.length > 0) {
-			// Pi draws at most 10 lines of a widget (#1412): show the 10 items
-			// around the next open one, so what the agent works on stays in view.
-			// UI only: setWidget never reaches the conversation or the prompt.
-			const lines = checklistWindow(checklistItems).map((item) => {
-				if (item.completed) {
-					return (
-						ctx.ui.theme.fg("success", "☑ ") +
-						ctx.ui.theme.fg("muted", ctx.ui.theme.strikethrough(item.text))
-					);
-				}
-				return `${ctx.ui.theme.fg("muted", "☐ ")}${item.text}`;
-			});
-			ctx.ui.setWidget("plannotator-progress", lines);
-		} else {
-			ctx.ui.setWidget("plannotator-progress", undefined);
-		}
-	}
 
 	/**
 	 * Mirror the checklist into an editable todo provider, when one is present.
 	 *
-	 * Additive by design: the progress widget above stays exactly as it was.
-	 * pi-todos renders its list on demand in `/todos` and has no live surface,
-	 * so replacing the widget with it would trade a visible tracker for files
-	 * behind a keystroke. Failures are swallowed after one notification —
-	 * a todo mirror must never break plan execution. Runs even when the
+	 * Failures notify once and leave status-line progress tracking active.
+	 * A todo mirror must never break plan execution. Runs even when the
 	 * checklist is empty so a resubmitted-empty plan still reconciles
 	 * (closing todos it used to own) instead of leaving them orphaned.
 	 */
@@ -644,7 +621,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		} catch (error) {
 			todoProviderDisabled = true;
 			ctx.ui.notify(
-				`Plannotator: ${todoProvider.name} sync failed, continuing with the progress widget only. ${
+				`Plannotator: ${todoProvider.name} sync failed, continuing with status-line progress only. ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 				"warning",
@@ -678,7 +655,6 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		item.completed = true;
 		if (lastSubmittedPath) persistCompletedChecklist(resolve(ctx.cwd, lastSubmittedPath));
 		updateStatus(ctx);
-		updateWidget(ctx);
 		await syncTodoProvider(ctx);
 		persistState();
 		return true;
@@ -792,7 +768,6 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		}
 
 		updateStatus(ctx);
-		updateWidget(ctx);
 		await syncTodoProvider(ctx);
 	}
 
@@ -869,7 +844,6 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		await restoreSavedState(ctx);
 		savedState = null;
 		updateStatus(ctx);
-		updateWidget(ctx);
 		persistState();
 	}
 
@@ -2416,7 +2390,6 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 		if (markCompletedSteps(text, checklistItems) > 0) {
 			if (lastSubmittedPath) persistCompletedChecklist(resolve(ctx.cwd, lastSubmittedPath));
 			updateStatus(ctx);
-			updateWidget(ctx);
 			await syncTodoProvider(ctx);
 		}
 		persistState();
@@ -2648,7 +2621,6 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 		}
 
 		updateStatus(ctx);
-		updateWidget(ctx);
 		persistState();
 	}
 
